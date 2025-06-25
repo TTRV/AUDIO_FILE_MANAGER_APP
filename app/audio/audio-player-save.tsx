@@ -18,7 +18,9 @@ type Recording = {
 };
 
 export default function AudioPlayerSaveScreen() {
-  const { uri, duration } = useLocalSearchParams<{ uri: string; duration: string }>();
+  const params = useLocalSearchParams<{ uri: string; duration: string }>();
+  const uri = params.uri ? decodeURIComponent(params.uri) : undefined;
+  const duration = params.duration;
   const [name, setName] = useState('');
   const [sound, setSound] = useState<Audio.Sound | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -28,10 +30,26 @@ export default function AudioPlayerSaveScreen() {
   const router = useRouter();
 
   useEffect(() => {
+    console.log('AudioPlayerSaveScreen loaded with params:', { uri, duration });
+    
+    const checkFile = async () => {
+      if (uri) {
+        try {
+          console.log('Audio file URI:', uri);
+          const fileInfo = await FileSystem.getInfoAsync(uri);
+          console.log('Audio file info on load:', fileInfo);
+        } catch (error) {
+          console.error('Error checking audio file:', error);
+        }
+      }
+    };
+    
+    checkFile();
+    
     return () => {
       if (sound) sound.unloadAsync();
     };
-  }, [sound]);
+  }, [sound, uri, duration]);
 
   const loadAndPlay = async () => {
     if (!uri) return;
@@ -80,23 +98,39 @@ export default function AudioPlayerSaveScreen() {
       Alert.alert('Please enter a name for your recording.');
       return;
     }
+    
+    if (!uri) {
+      Alert.alert('Error', 'No recording file available to save.');
+      return;
+    }
+    
     try {
       const id = Date.now().toString();
-      const fileName = `${name.trim().replace(/\s+/g, '_')}_${id}.m4a`;
-      let newRecording;
-      if (Constants.appOwnership === 'expo') {
-        // Expo Go: use cache URI directly
-        newRecording = { id, name: fileName, duration: duration || 'Unknown', uri };
-      } else {
-        // Standalone: move to permanent storage
-        const newPath = FileSystem.documentDirectory + fileName;
-        await FileSystem.moveAsync({ from: uri, to: newPath });
-        newRecording = { id, name: fileName, duration: duration || 'Unknown', uri: newPath };
+      
+      // Since we already have the permanent URI, just save the recording info
+      const newRecording = { 
+        id, 
+        name: name.trim(), 
+        duration: duration || 'Unknown', 
+        uri: uri // This is already the permanent path
+      };
+      
+      console.log('Saving recording info:', newRecording);
+      
+      // Verify the file still exists before saving
+      const fileInfo = await FileSystem.getInfoAsync(uri);
+      if (!fileInfo.exists) {
+        throw new Error('Recording file no longer exists');
       }
+      
+      console.log('File verification passed, size:', fileInfo.size);
+      
       const data = await AsyncStorage.getItem(STORAGE_KEY);
       const recordings = data ? JSON.parse(data) : [];
       const updatedRecordings = [newRecording, ...recordings];
       await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(updatedRecordings));
+      
+      console.log('Recording saved successfully to storage');
       router.replace('/audio');
     } catch (e) {
       console.error('Failed to save recording:', e);

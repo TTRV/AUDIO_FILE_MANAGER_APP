@@ -19,8 +19,14 @@ export default function RootLayout() {
 
   return (
     <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-      <Stack>
-        <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+      <Stack screenOptions={{ headerShown: false }}>
+        <Stack.Screen name="index" />
+        <Stack.Screen name="(tabs)" />
+        <Stack.Screen name="audio/audio-player" />
+        <Stack.Screen name="audio/audio-player-save" />
+        <Stack.Screen name="audio/recording-in-progress" />
+        <Stack.Screen name="audio/save-audio" />
+        <Stack.Screen name="audio/start-recording" />
         <Stack.Screen name="+not-found" />
       </Stack>
       <StatusBar style="auto" />

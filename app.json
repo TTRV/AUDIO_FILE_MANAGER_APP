@@ -25,20 +25,26 @@
         "backgroundColor": "#ffffff"
       },
       "edgeToEdgeEnabled": true,
-      "package": "com.anonymous.AudioFileManagerApp",
+      "package": "com.audiofilemanager.app",
       "permissions": [
         "android.permission.INTERNET",
         "android.permission.ACCESS_NETWORK_STATE",
         "android.permission.READ_EXTERNAL_STORAGE",
         "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.READ_MEDIA_AUDIO",
+        "android.permission.READ_MEDIA_IMAGES",
+        "android.permission.READ_MEDIA_VIDEO",
         "android.permission.DOWNLOAD_WITHOUT_NOTIFICATION",
         "android.permission.RECORD_AUDIO",
         "android.permission.MODIFY_AUDIO_SETTINGS",
         "android.permission.WAKE_LOCK",
         "android.permission.FOREGROUND_SERVICE",
         "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS",
-        "android.permission.MANAGE_EXTERNAL_STORAGE"
+        "android.permission.MANAGE_EXTERNAL_STORAGE",
+        "android.permission.POST_NOTIFICATIONS"
       ],
+      "requestLegacyExternalStorage": true,
+      "allowBackup": true,
       "intentFilters": [
         {
           "action": "VIEW",

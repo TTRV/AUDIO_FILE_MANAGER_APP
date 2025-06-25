@@ -1,10 +1,19 @@
-import React, { useState, useEffect } from 'react';
-import { View, Text, StyleSheet, FlatList, TouchableOpacity, Alert, RefreshControl } from 'react-native';
-import { MaterialIcons, Ionicons } from '@expo/vector-icons';
-import { Audio } from 'expo-av';
+import { Ionicons, MaterialIcons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { useRouter, useFocusEffect } from 'expo-router';
+import { Audio } from 'expo-av';
 import * as FileSystem from 'expo-file-system';
+import { useFocusEffect, useRouter } from 'expo-router';
+import React, { useEffect, useState } from 'react';
+import {
+  Alert,
+  FlatList,
+  RefreshControl,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
+} from 'react-native';
+import { audioStyles } from '../styles/audioStyles';
 
 const STORAGE_KEY = 'AUDIO_RECORDINGS';
 
@@ -13,6 +22,7 @@ type Recording = {
   name: string;
   duration: string;
   uri: string;
+  size?: number; // file size in bytes (optional for backward compatibility)
 };
 
 export default function RecordingsScreen() {
@@ -21,11 +31,14 @@ export default function RecordingsScreen() {
   const [playingId, setPlayingId] = useState<string | null>(null);
   const [isPaused, setIsPaused] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [permissionStatus, setPermissionStatus] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [filteredRecordings, setFilteredRecordings] = useState<Recording[]>([]);
   const router = useRouter();
 
-  // Load recordings when component mounts
   useEffect(() => {
     loadRecordings();
+    checkPermissions();
     return () => {
       if (currentPlayback) {
         currentPlayback.unloadAsync();
@@ -33,28 +46,76 @@ export default function RecordingsScreen() {
     };
   }, []);
 
-  // Refresh recordings when screen comes into focus
+  // Auto-update filtered recordings when recordings or search query changes
+  useEffect(() => {
+    if (!searchQuery.trim()) {
+      setFilteredRecordings(recordings);
+    } else {
+      const filtered = recordings.filter(recording =>
+        recording.name.toLowerCase().includes(searchQuery.toLowerCase())
+      );
+      setFilteredRecordings(filtered);
+    }
+  }, [recordings, searchQuery]);
+
+  const checkPermissions = async () => {
+    try {
+      const { status } = await Audio.getPermissionsAsync();
+      setPermissionStatus(status);
+    } catch (error) {
+      setPermissionStatus('denied');
+    }
+  };
+
   useFocusEffect(
     React.useCallback(() => {
       loadRecordings();
+      checkPermissions();
     }, [])
   );
 
   const loadRecordings = async () => {
     try {
-      console.log('Loading recordings...');
       const data = await AsyncStorage.getItem(STORAGE_KEY);
       if (data) {
-        const parsedRecordings = JSON.parse(data);
-        console.log('Found recordings:', parsedRecordings.length);
-        setRecordings(parsedRecordings);
+        const allRecordings = JSON.parse(data);
+        console.log('Loaded recordings:', allRecordings);
+        
+        const validRecordings = [];
+        for (const recording of allRecordings) {
+          try {
+            const fileInfo = await FileSystem.getInfoAsync(recording.uri);
+            if (fileInfo.exists) {
+              // Add file size if missing (for backward compatibility)
+              if (!recording.size && fileInfo.size) {
+                recording.size = fileInfo.size;
+              }
+              validRecordings.push(recording);
+            } else {
+              console.log('Missing file removed:', recording.name);
+            }
+          } catch (error) {
+            console.log('Error checking file:', recording.name, error);
+          }
+        }
+        
+        // Save if we cleaned up missing files or added size data
+        const needsUpdate = validRecordings.length !== allRecordings.length || 
+                           validRecordings.some((rec, index) => !allRecordings[index]?.size && rec.size);
+        
+        if (needsUpdate) {
+          await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(validRecordings));
+          console.log(`Updated recordings with file sizes and cleaned up missing files`);
+        }
+        
+        setRecordings(validRecordings);
       } else {
-        console.log('No recordings found');
         setRecordings([]);
       }
     } catch (e) {
       console.error('Failed to load recordings', e);
       setRecordings([]);
+      setFilteredRecordings([]);
     }
   };
 
@@ -67,107 +128,116 @@ export default function RecordingsScreen() {
   const saveRecordings = async (newRecordings: Recording[]) => {
     try {
       await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(newRecordings));
-      console.log('Recordings saved:', newRecordings.length);
     } catch (e) {
       console.error('Failed to save recordings', e);
     }
   };
 
+  const handleSearch = (text: string) => {
+    setSearchQuery(text);
+  };
+
+  const formatFileSize = (bytes: number): string => {
+    if (!bytes || bytes === 0) return 'Unknown size';
+    
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+  };
+
   const playAudio = async (id: string) => {
     try {
-      const rec = recordings.find(r => r.id === id);
+      const rec = recordings.find((r) => r.id === id);
       if (!rec) return;
-      // Check if file exists
+
+      console.log('Attempting to play:', rec.uri);
       const fileInfo = await FileSystem.getInfoAsync(rec.uri);
+      console.log('File info:', fileInfo);
+      
       if (!fileInfo.exists) {
-        Alert.alert('File not found', 'This recording file is missing and will be removed from the list.');
-        const updatedRecordings = recordings.filter(r => r.id !== id);
-        setRecordings(updatedRecordings);
-        await saveRecordings(updatedRecordings);
+        Alert.alert(
+          'File Missing', 
+          'This recording file is no longer available. It will be removed from the list.',
+          [
+            {
+              text: 'OK',
+              onPress: async () => {
+                const updated = recordings.filter((r) => r.id !== id);
+                setRecordings(updated);
+                await saveRecordings(updated);
+              }
+            }
+          ]
+        );
         return;
       }
-      // If the same audio is currently playing, pause it
-      if (playingId === id && currentPlayback && !isPaused) {
-        await currentPlayback.pauseAsync();
-        setIsPaused(true);
-        return;
-      }
-      // If the same audio was paused, resume it
-      if (playingId === id && currentPlayback && isPaused) {
-        await currentPlayback.playAsync();
-        setIsPaused(false);
-        return;
-      }
-      // If a different audio is playing, stop it first
+
+      // Stop any current playback before navigating
       if (currentPlayback) {
         await currentPlayback.unloadAsync();
         setCurrentPlayback(null);
         setPlayingId(null);
         setIsPaused(false);
       }
-      // Start playing the new audio
-      const { sound } = await Audio.Sound.createAsync({ uri: rec.uri });
-      setCurrentPlayback(sound);
-      setPlayingId(id);
-      setIsPaused(false);
-      await sound.playAsync();
-      sound.setOnPlaybackStatusUpdate((status) => {
-        if (!status.isLoaded) return;
-        if (status.didJustFinish) {
-          setPlayingId(null);
-          setIsPaused(false);
-          sound.unloadAsync();
+
+      // Navigate to dedicated audio player screen
+      router.push({
+        pathname: '/audio/audio-player',
+        params: {
+          uri: rec.uri,
+          name: rec.name,
+          duration: rec.duration?.toString() || '0'
         }
       });
     } catch (e) {
-      Alert.alert('Failed to play audio', e instanceof Error ? e.message : JSON.stringify(e));
-      console.error('Failed to play audio', e);
+      Alert.alert('Playback Error', e instanceof Error ? e.message : JSON.stringify(e));
     }
   };
 
   const deleteRecording = async (id: string) => {
-    Alert.alert(
-      'Delete Recording',
-      'Are you sure you want to delete this recording?',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Delete',
-          style: 'destructive',
-          onPress: async () => {
-            try {
-              const updatedRecordings = recordings.filter(r => r.id !== id);
-              setRecordings(updatedRecordings);
-              await saveRecordings(updatedRecordings);
-              
-              // Stop playback if the deleted recording was playing
-              if (playingId === id && currentPlayback) {
-                await currentPlayback.unloadAsync();
-                setCurrentPlayback(null);
-                setPlayingId(null);
-                setIsPaused(false);
-              }
-            } catch (e) {
-              console.error('Failed to delete recording', e);
+    Alert.alert('Delete Recording', 'Are you sure you want to delete this recording?', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            const updated = recordings.filter((r) => r.id !== id);
+            setRecordings(updated);
+            await saveRecordings(updated);
+
+            if (playingId === id && currentPlayback) {
+              await currentPlayback.unloadAsync();
+              setCurrentPlayback(null);
+              setPlayingId(null);
+              setIsPaused(false);
             }
-          },
+          } catch (e) {
+            console.error('Failed to delete recording', e);
+          }
         },
-      ]
-    );
+      },
+    ]);
   };
 
   const renderRecording = ({ item }: { item: Recording }) => (
-    <View style={styles.recordingCard}>
-      <View style={styles.recordingInfo}>
-        <View style={styles.iconContainer}>
+    <View style={audioStyles.recordingCard}>
+      <View style={audioStyles.recordingInfo}>
+        <View style={audioStyles.iconContainer}>
           <Ionicons name="musical-notes" size={24} color="#fff" />
         </View>
-        <View style={styles.textContainer}>
-          <Text style={styles.recordingName}>{item.name}</Text>
-          <Text style={styles.recordingDuration}>{item.duration}</Text>
+        <View style={audioStyles.textContainer}>
+          <Text style={audioStyles.recordingName}>{item.name}</Text>
+          <View style={audioStyles.recordingMetadata}>
+            <Text style={audioStyles.recordingDuration}>{item.duration}</Text>
+            <Text style={audioStyles.recordingSeparator}>•</Text>
+            <Text style={audioStyles.recordingSize}>{formatFileSize(item.size || 0)}</Text>
+          </View>
         </View>
-        <View style={styles.actions}>
-          <TouchableOpacity onPress={() => playAudio(item.id)} style={styles.playButton}>
+        <View style={audioStyles.actions}>
+          <TouchableOpacity onPress={() => playAudio(item.id)} style={audioStyles.playButton}>
             <Ionicons
               name={
                 playingId === item.id
@@ -180,7 +250,7 @@ export default function RecordingsScreen() {
               color="#4F8EF7"
             />
           </TouchableOpacity>
-          <TouchableOpacity onPress={() => deleteRecording(item.id)} style={styles.deleteButton}>
+          <TouchableOpacity onPress={() => deleteRecording(item.id)} style={audioStyles.deleteButton}>
             <MaterialIcons name="delete" size={24} color="#E74C3C" />
           </TouchableOpacity>
         </View>
@@ -189,167 +259,88 @@ export default function RecordingsScreen() {
   );
 
   return (
-    <View style={styles.container}>
-      <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
-          <MaterialIcons name="arrow-back" size={24} color="#222" />
-        </TouchableOpacity>
-        <Text style={styles.title}>My Recordings</Text>
-        <TouchableOpacity style={styles.addButton} onPress={() => router.push('/audio/start-recording')}>
-          <MaterialIcons name="add" size={32} color="#1A2366" />
+    <View style={audioStyles.container}>
+      <View style={audioStyles.header}>
+        <View style={audioStyles.headerLeft}>
+        </View>
+        <Text style={audioStyles.title}>Audio Recordings</Text>
+        <TouchableOpacity
+          style={[audioStyles.addButton, permissionStatus === 'denied' && audioStyles.addButtonDisabled]}
+          onPress={() => router.push('/audio/start-recording')}
+        >
+          <MaterialIcons 
+            name={permissionStatus === 'granted' ? 'add' : permissionStatus === 'denied' ? 'mic-off' : 'mic'} 
+            size={28} 
+            color={permissionStatus === 'denied' ? '#ccc' : '#1A2366'} 
+          />
         </TouchableOpacity>
       </View>
-      <Text style={styles.sessionNote}>
-        Note: In Expo Go, recordings are only available during the current session. They will be lost if the app is closed or reloaded.
-      </Text>
+      
+      {recordings.length > 0 && (
+        <View style={audioStyles.searchContainer}>
+          <View style={audioStyles.searchInputContainer}>
+            <MaterialIcons name="search" size={20} color="#666" style={audioStyles.searchIcon} />
+            <TextInput
+              style={audioStyles.searchInput}
+              placeholder="Search recordings..."
+              value={searchQuery}
+              onChangeText={handleSearch}
+              placeholderTextColor="#999"
+            />
+            {searchQuery.length > 0 && (
+              <TouchableOpacity
+                onPress={() => handleSearch('')}
+                style={audioStyles.clearSearchButton}
+              >
+                <MaterialIcons name="clear" size={20} color="#666" />
+              </TouchableOpacity>
+            )}
+          </View>
+          {searchQuery.length > 0 && (
+            <Text style={audioStyles.searchResults}>
+              {filteredRecordings.length} of {recordings.length} recordings
+            </Text>
+          )}
+        </View>
+      )}
+      
       <FlatList
-        data={recordings}
+        data={filteredRecordings}
         keyExtractor={(item) => item.id}
         renderItem={renderRecording}
-        contentContainerStyle={styles.listContent}
+        contentContainerStyle={filteredRecordings.length === 0 && searchQuery.length > 0 ? audioStyles.emptyListContent : recordings.length === 0 ? audioStyles.emptyListContent : audioStyles.listContent}
         showsVerticalScrollIndicator={false}
         ListEmptyComponent={
-          <View style={styles.emptyContainer}>
-            <MaterialIcons name="library-music" size={64} color="#ccc" />
-            <Text style={styles.emptyTitle}>No Recordings Yet</Text>
-            <Text style={styles.emptySubtitle}>
-              Start recording audio to see them here
-            </Text>
-            <TouchableOpacity 
-              style={styles.recordButton}
-              onPress={() => router.push('/audio')}
-            >
-              <MaterialIcons name="fiber-manual-record" size={24} color="#fff" />
-              <Text style={styles.recordButtonText}>Go to Audio Home</Text>
-            </TouchableOpacity>
-          </View>
+          searchQuery.length > 0 ? (
+            <View style={audioStyles.emptyContainer}>
+              <MaterialIcons name="search-off" size={80} color="#E0E6F0" />
+              <Text style={audioStyles.emptyTitle}>No Results Found</Text>
+              <Text style={audioStyles.emptySubtitle}>
+                No recordings match "{searchQuery}". Try a different search term.
+              </Text>
+              <TouchableOpacity 
+                style={audioStyles.recordButton} 
+                onPress={() => handleSearch('')}
+              >
+                <MaterialIcons name="clear" size={24} color="#fff" />
+                <Text style={audioStyles.recordButtonText}>Clear Search</Text>
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <View style={audioStyles.emptyContainer}>
+              <MaterialIcons name="library-music" size={80} color="#E0E6F0" />
+              <Text style={audioStyles.emptyTitle}>No Recordings Yet</Text>
+              <Text style={audioStyles.emptySubtitle}>Start recording audio to see them here</Text>
+              <TouchableOpacity style={audioStyles.recordButton} onPress={() => router.push('/audio/start-recording')}>
+                <MaterialIcons name="mic" size={24} color="#fff" />
+                <Text style={audioStyles.recordButtonText}>Start Recording</Text>
+              </TouchableOpacity>
+            </View>
+          )
         }
-        refreshControl={
-          <RefreshControl
-            refreshing={refreshing}
-            onRefresh={onRefresh}
-          />
-        }
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
       />
     </View>
   );
 }
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#F6F8FB',
-  },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 20,
-    paddingTop: 60,
-    paddingBottom: 20,
-  },
-  backButton: {
-    padding: 8,
-  },
-  title: {
-    fontSize: 24,
-    fontWeight: 'bold',
-  },
-  addButton: {
-    backgroundColor: '#fff',
-    borderRadius: 24,
-    padding: 4,
-    elevation: 2,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.08,
-    shadowRadius: 8,
-  },
-  recordingCard: {
-    backgroundColor: '#fff',
-    borderRadius: 16,
-    padding: 16,
-    marginBottom: 12,
-    flexDirection: 'row',
-    alignItems: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 8,
-    elevation: 4,
-  },
-  recordingInfo: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  iconContainer: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: '#4F8EF7',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  textContainer: {
-    marginLeft: 10,
-  },
-  recordingName: {
-    fontSize: 18,
-    fontWeight: 'bold',
-  },
-  recordingDuration: {
-    fontSize: 14,
-    color: '#666',
-  },
-  actions: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginLeft: 16,
-    gap: 8,
-  },
-  playButton: {
-    padding: 8,
-  },
-  deleteButton: {
-    padding: 8,
-  },
-  listContent: {
-    padding: 10,
-  },
-  emptyContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  emptyTitle: {
-    fontSize: 24,
-    fontWeight: 'bold',
-    marginBottom: 10,
-  },
-  emptySubtitle: {
-    fontSize: 16,
-    color: '#666',
-    marginBottom: 20,
-  },
-  recordButton: {
-    backgroundColor: '#4F8EF7',
-    padding: 10,
-    borderRadius: 5,
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  recordButtonText: {
-    fontSize: 16,
-    fontWeight: 'bold',
-    color: '#fff',
-    marginLeft: 10,
-  },
-  sessionNote: {
-    color: '#E67E22',
-    fontSize: 14,
-    marginBottom: 12,
-    textAlign: 'center',
-    fontStyle: 'italic',
-  },
-}); 

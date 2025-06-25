@@ -1,0 +1,23 @@
+# Reduce build upload size
+node_modules/
+.expo/
+.git/
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+recordings/
+record/
+android/build/
+android/app/build/
+
+# Development files
+.vscode/
+.idea/
+*.local
+.env.local
+
+# Documentation
+README.md
+CLAUDE.md
+PRIVACY_POLICY.md

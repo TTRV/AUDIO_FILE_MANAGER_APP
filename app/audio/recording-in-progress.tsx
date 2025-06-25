@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Animated, Alert } from 'react-native';
 import { Audio } from 'expo-av';
+import * as FileSystem from 'expo-file-system';
 import { useRouter } from 'expo-router';
 
 function Waveform() {
@@ -35,45 +36,151 @@ export default function RecordingInProgressScreen() {
   const startRecording = async () => {
     try {
       setError(null);
-      const { status } = await Audio.requestPermissionsAsync();
-      if (status !== 'granted') {
-        setError('Microphone permission denied.');
+      console.log('Checking audio permissions...');
+      
+      // Check current permission status first
+      const { status: currentStatus } = await Audio.getPermissionsAsync();
+      console.log('Current permission status:', currentStatus);
+      
+      let finalStatus = currentStatus;
+      
+      // If permission is not granted, request it
+      if (currentStatus !== 'granted') {
+        console.log('Requesting audio permissions...');
+        const { status: requestedStatus } = await Audio.requestPermissionsAsync();
+        console.log('Permission request result:', requestedStatus);
+        finalStatus = requestedStatus;
+      }
+      
+      if (finalStatus !== 'granted') {
+        setError(`Microphone permission ${finalStatus}. Please enable in device settings.`);
+        Alert.alert(
+          'Permission Required',
+          'Microphone access is required to record audio. Please enable it in your device settings and try again.',
+          [
+            { text: 'OK', onPress: () => router.back() }
+          ]
+        );
         return;
       }
-      await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
+      
+      console.log('Setting audio mode...');
+      await Audio.setAudioModeAsync({ 
+        allowsRecordingIOS: true, 
+        playsInSilentModeIOS: true,
+        shouldDuckAndroid: true,
+        playThroughEarpieceAndroid: false,
+        staysActiveInBackground: false 
+      });
+      
+      console.log('Creating recording...');
       const recording = new Audio.Recording();
+      console.log('Recording object created');
+      
       await recording.prepareToRecordAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
+      console.log('Recording prepared');
+      
       await recording.startAsync();
+      console.log('Recording started');
+      
       recordingRef.current = recording;
       setIsRecording(true);
       setRecordingTime(0);
       timerRef.current = setInterval(() => setRecordingTime(prev => prev + 1), 1000) as unknown as NodeJS.Timeout;
+      console.log('Recording setup completed successfully');
     } catch (e) {
-      setError('Failed to start recording.');
+      console.error('Recording error:', e);
+      setError(`Failed to start recording: ${e instanceof Error ? e.message : 'Unknown error'}`);
       setIsRecording(false);
     }
   };
 
   const stopRecording = async () => {
     try {
-      if (!recordingRef.current) return;
-      await recordingRef.current.stopAndUnloadAsync();
-      const uri = recordingRef.current.getURI();
-      if (!uri) {
-        setError('Failed to save recording.');
+      if (!recordingRef.current) {
+        setError('No recording in progress.');
         return;
       }
-      let duration = 'Unknown';
-      const { status } = await recordingRef.current.createNewLoadedSoundAsync();
-      if ('durationMillis' in status && typeof status.durationMillis === 'number') {
-        duration = (status.durationMillis / 1000).toFixed(1) + 's';
+      
+      console.log('Stopping recording...');
+      
+      // Stop the recording first
+      await recordingRef.current.stopAndUnloadAsync();
+      console.log('Recording stopped successfully');
+      
+      // Get the URI immediately
+      const tempUri = recordingRef.current.getURI();
+      console.log('Recording temp URI:', tempUri);
+      
+      if (!tempUri) {
+        setError('Failed to get recording URI. Please try recording again.');
+        console.error('URI is null or undefined');
+        setTimeout(() => {
+          router.back();
+        }, 3000);
+        return;
       }
-      if (timerRef.current) clearInterval(timerRef.current);
+      
+      // Immediately copy to permanent storage to prevent cache cleanup
+      const timestamp = Date.now();
+      const fileName = `recording_${timestamp}.m4a`;
+      const permanentUri = FileSystem.documentDirectory + fileName;
+      
+      console.log('Copying from temp to permanent storage...');
+      console.log('From:', tempUri);
+      console.log('To:', permanentUri);
+      
+      try {
+        await FileSystem.copyAsync({
+          from: tempUri,
+          to: permanentUri
+        });
+        console.log('File copied successfully to permanent storage');
+        
+        // Verify the permanent file exists
+        const fileInfo = await FileSystem.getInfoAsync(permanentUri);
+        console.log('Permanent file info:', fileInfo);
+        
+        if (!fileInfo.exists) {
+          throw new Error('Failed to copy recording to permanent storage');
+        }
+        
+      } catch (copyError) {
+        console.error('Copy error:', copyError);
+        setError(`Failed to save recording: ${copyError.message}`);
+        return;
+      }
+      
+      const duration = `${recordingTime}s`;
+      
+      // Clean up
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+      }
       setIsRecording(false);
-      router.replace({ pathname: '/audio/audio-player-save', params: { uri, duration } });
+      
+      console.log('Navigating to audio player with permanent URI:', permanentUri);
+      
+      // Navigate with the permanent URI
+      router.replace({ 
+        pathname: '/audio/audio-player-save', 
+        params: { uri: encodeURIComponent(permanentUri), duration } 
+      });
+      
     } catch (e) {
-      setError('Failed to stop and save recording.');
+      console.error('Stop recording error:', e);
+      console.error('Error type:', typeof e);
+      console.error('Error message:', e?.message || 'No message');
+      
+      setError(`Recording failed: ${e?.message || 'Unknown error'}`);
       setIsRecording(false);
+      
+      // Clean up on error
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+      }
     }
   };
 
@@ -94,15 +201,27 @@ export default function RecordingInProgressScreen() {
         )}
         <Waveform />
         <Text style={styles.timer}>{formatTime(recordingTime)}</Text>
-        {error && <Text style={styles.errorText}>{error}</Text>}
-        <TouchableOpacity
-          style={styles.doneButton}
-          onPress={stopRecording}
-          activeOpacity={0.8}
-          disabled={!isRecording}
-        >
-          <Text style={styles.doneButtonText}>Done</Text>
-        </TouchableOpacity>
+        {error && (
+          <View style={styles.errorContainer}>
+            <Text style={styles.errorText}>{error}</Text>
+            <TouchableOpacity 
+              style={styles.retryButton} 
+              onPress={() => router.back()}
+            >
+              <Text style={styles.retryButtonText}>Go Back</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+        {!error && (
+          <TouchableOpacity
+            style={[styles.doneButton, !isRecording && styles.doneButtonDisabled]}
+            onPress={stopRecording}
+            activeOpacity={0.8}
+            disabled={!isRecording}
+          >
+            <Text style={styles.doneButtonText}>Done</Text>
+          </TouchableOpacity>
+        )}
       </View>
     </View>
   );
@@ -185,5 +304,25 @@ const styles = StyleSheet.create({
     fontSize: 16,
     marginBottom: 12,
     textAlign: 'center',
+  },
+  errorContainer: {
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  retryButton: {
+    backgroundColor: '#E74C3C',
+    borderRadius: 12,
+    paddingHorizontal: 20,
+    paddingVertical: 8,
+    marginTop: 8,
+  },
+  retryButtonText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: 'bold',
+  },
+  doneButtonDisabled: {
+    backgroundColor: '#ccc',
+    opacity: 0.6,
   },
 }); 
